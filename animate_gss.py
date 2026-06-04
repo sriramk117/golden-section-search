@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+"""Animate Golden Section Search on unimodal functions."""
+
 from __future__ import annotations
 
 import argparse
@@ -9,16 +12,10 @@ import numpy as np
 from matplotlib.patches import Rectangle
 
 from gss import INVPHI, gss, gss_iterate
+from problems import PROBLEMS, Problem, TOLERANCE, get_problem
 
-# f(x) = (x - 2)^2  — minimum at x = 2, classic GSS example
-def objective(x: float | np.ndarray) -> float | np.ndarray:
-    return (x - 2.0) ** 2
-
-
-INTERVAL = (0.0, 5.0)
-TOLERANCE = 1e-4
-PAUSE_FRAMES = 8
-FINAL_PAUSE_FRAMES = 24
+PAUSE_FRAMES = 6
+FINAL_PAUSE_FRAMES = 20
 
 COLORS = {
     "bg": "#0f1117",
@@ -37,10 +34,11 @@ COLORS = {
 }
 
 
-def build_frames() -> list[dict]:
+def build_frames(problem: Problem) -> list[dict]:
     """Collect animation frames from the search iterator."""
     frames: list[dict] = []
-    for step in gss_iterate(objective, *INTERVAL, tolerance=TOLERANCE):
+    a0, b0 = problem.interval
+    for step in gss_iterate(problem.f, a0, b0, tolerance=TOLERANCE):
         payload = {
             "iteration": step.iteration,
             "a": step.a,
@@ -58,17 +56,16 @@ def build_frames() -> list[dict]:
     return frames
 
 
-def setup_axes(fig: plt.Figure) -> tuple[plt.Axes, plt.Axes]:
-    x = np.linspace(INTERVAL[0] - 0.3, INTERVAL[1] + 0.3, 400)
-    y = objective(x)
+def setup_axes(fig: plt.Figure, problem: Problem) -> tuple[plt.Axes, plt.Axes]:
+    lo, hi = problem.interval
+    pad = 0.25
 
     ax = fig.add_axes([0.08, 0.22, 0.84, 0.68])
     ax.set_facecolor(COLORS["panel"])
-    ax.plot(x, y, color=COLORS["curve"], lw=2.5, zorder=2)
-    ax.fill_between(x, y, y.max() + 1, color=COLORS["curve"], alpha=0.06, zorder=1)
-    ax.axvline(2.0, color=COLORS["minimum"], ls="--", lw=1.2, alpha=0.55, zorder=1)
-    ax.set_xlim(INTERVAL[0] - 0.25, INTERVAL[1] + 0.25)
-    ax.set_ylim(-0.4, y.max() + 0.8)
+    ymax = problem.plot_curve(ax, COLORS["curve"])
+    ymin = 0.0 if "absolute" in problem.id or "piecewise" in problem.id else -0.4
+    ax.set_xlim(lo - pad, hi + pad)
+    ax.set_ylim(ymin, ymax + 0.9)
     ax.set_xlabel("x", color=COLORS["text"], fontsize=11)
     ax.set_ylabel("f(x)", color=COLORS["text"], fontsize=11)
     ax.tick_params(colors=COLORS["muted"])
@@ -82,43 +79,40 @@ def setup_axes(fig: plt.Figure) -> tuple[plt.Axes, plt.Axes]:
 
     fig.patch.set_facecolor(COLORS["bg"])
     fig.suptitle(
-        "Golden Section Search",
+        f"Golden Section Search — {problem.name}",
         color=COLORS["accent"],
-        fontsize=18,
+        fontsize=17,
         fontweight="bold",
         y=0.97,
-    )
-    ax.set_title(
-        r"$f(x) = (x - 2)^2$  on  $[0,\,5]$",
-        color=COLORS["muted"],
-        fontsize=12,
-        pad=10,
     )
     return ax, info
 
 
 def draw_frame(
     ax: plt.Axes,
-    info: plt.Axes,
     frame: dict,
     artists: dict,
+    problem: Problem,
 ) -> None:
+    lo, hi = problem.interval
+    x_pad = 0.25
     a, b = frame["a"], frame["b"]
 
-    # Bracket interval on the x-axis
     artists["interval"].set_x(a)
     artists["interval"].set_width(b - a)
 
-    # Discarded region flash (shown briefly after a decision)
     artists["discarded"].set_visible(False)
     if frame["phase"] == "search" and frame["keep_left"] is not None:
         if frame["keep_left"]:
             artists["discarded"].set_x(b)
-            artists["discarded"].set_width(INTERVAL[1] + 0.25 - b)
+            artists["discarded"].set_width(hi + x_pad - b)
         else:
-            artists["discarded"].set_x(INTERVAL[0] - 0.25)
-            artists["discarded"].set_width(a - (INTERVAL[0] - 0.25))
+            artists["discarded"].set_x(lo - x_pad)
+            artists["discarded"].set_width(a - (lo - x_pad))
         artists["discarded"].set_visible(True)
+
+    y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
+    label_dy = 0.06 * y_range
 
     for key in ("c", "d"):
         x_val = frame[key]
@@ -131,58 +125,63 @@ def draw_frame(
             label.set_visible(False)
             continue
 
-        fx = objective(x_val)
+        fx = float(problem.eval(x_val))
         line.set_data([x_val, x_val], [0, fx])
         line.set_visible(True)
         scatter.set_offsets([[x_val, fx]])
         scatter.set_visible(True)
-        label.set_position((x_val, fx + 0.35))
-        label.set_text(f"{key} = {x_val:.4f}")
+        label.set_position((x_val, fx + label_dy))
+        label.set_text(f"{key} = {x_val:.3f}")
         label.set_visible(True)
 
-    # Estimated minimum marker at convergence
     artists["estimate"].set_visible(frame["done"])
     if frame["done"]:
         x_hat = (a + b) / 2
-        artists["estimate"].set_offsets([[x_hat, objective(x_hat)]])
-        artists["estimate"].set_label(f"estimate ≈ {x_hat:.5f}")
+        artists["estimate"].set_offsets([[x_hat, problem.eval(x_hat)]])
+        artists["estimate"].set_label(f"estimate ≈ {x_hat:.4f}")
 
     width = b - a
     if frame["phase"] == "start":
         status = "Initial bracket [a, b]"
         detail = (
-            f"a = {a:.4f}   b = {b:.4f}   width = {width:.4f}\n"
-            f"Place c and d using the golden ratio  φ⁻¹ ≈ {INVPHI:.6f}"
+            f"a = {a:.3f}   b = {b:.3f}   width = {width:.3f}   "
+            f"tolerance = {TOLERANCE}\n"
+            f"Interior points use φ⁻¹ ≈ {INVPHI:.4f}"
         )
     elif frame["done"]:
         x_hat = (a + b) / 2
-        status = "Converged"
+        n_iters = frame["iteration"]
+        status = f"Converged in {n_iters} iteration{'s' if n_iters != 1 else ''}"
         detail = (
-            f"Final bracket width {width:.2e} < tolerance {TOLERANCE:.0e}\n"
-            f"Minimum estimate: x* ≈ {x_hat:.6f}   (true minimum at x = 2)"
+            f"Bracket width {width:.4f} ≤ tolerance {TOLERANCE}\n"
+            f"Estimate x* ≈ {x_hat:.4f}   (true minimum at {problem.true_minimum_label})"
         )
     else:
         decision = "keep [a, d]" if frame["keep_left"] else "keep [c, b]"
         cmp_txt = "f(c) < f(d)" if frame["keep_left"] else "f(c) ≥ f(d)"
-        status = f"Iteration {frame['iteration'] + 1}  —  {cmp_txt}  →  {decision}"
+        status = f"Step {frame['iteration'] + 1}  —  {cmp_txt}  →  {decision}"
         detail = (
-            f"a = {a:.5f}   b = {b:.5f}   width = {width:.5f}\n"
-            f"f(c) = {frame['fc']:.5f}   f(d) = {frame['fd']:.5f}"
+            f"a = {a:.4f}   b = {b:.4f}   width = {width:.4f}\n"
+            f"f(c) = {frame['fc']:.4f}   f(d) = {frame['fd']:.4f}"
         )
 
     artists["status"].set_text(status)
     artists["detail"].set_text(detail)
 
 
-def create_animation(save_path: Path | None = None) -> animation.FuncAnimation:
-    frames = build_frames()
+def create_animation(
+    problem: Problem,
+    save_path: Path | None = None,
+) -> animation.FuncAnimation:
+    frames = build_frames(problem)
+    lo, hi = problem.interval
     fig = plt.figure(figsize=(10, 6.5), dpi=120)
-    ax, info = setup_axes(fig)
+    ax, info = setup_axes(fig, problem)
 
     artists = {
         "interval": Rectangle(
-            (INTERVAL[0], -0.08),
-            INTERVAL[1] - INTERVAL[0],
+            (lo, -0.08),
+            hi - lo,
             0.16,
             facecolor=COLORS["interval"],
             edgecolor=COLORS["accent"],
@@ -201,20 +200,43 @@ def create_animation(save_path: Path | None = None) -> animation.FuncAnimation:
         ),
         "line_c": ax.plot([], [], color=COLORS["point_c"], ls=":", lw=1.4, zorder=4)[0],
         "line_d": ax.plot([], [], color=COLORS["point_d"], ls=":", lw=1.4, zorder=4)[0],
-        "scatter_c": ax.scatter([], [], s=90, color=COLORS["point_c"], zorder=5, edgecolors="white", lw=0.8),
-        "scatter_d": ax.scatter([], [], s=90, color=COLORS["point_d"], zorder=5, edgecolors="white", lw=0.8),
-        "estimate": ax.scatter([], [], s=140, marker="*", color=COLORS["minimum"], zorder=6, edgecolors="white", lw=0.8),
+        "scatter_c": ax.scatter(
+            [], [], s=90, color=COLORS["point_c"], zorder=5, edgecolors="white", lw=0.8
+        ),
+        "scatter_d": ax.scatter(
+            [], [], s=90, color=COLORS["point_d"], zorder=5, edgecolors="white", lw=0.8
+        ),
+        "estimate": ax.scatter(
+            [],
+            [],
+            s=140,
+            marker="*",
+            color=COLORS["minimum"],
+            zorder=6,
+            edgecolors="white",
+            lw=0.8,
+        ),
         "label_c": ax.text(0, 0, "", ha="center", color=COLORS["point_c"], fontsize=9, zorder=7),
         "label_d": ax.text(0, 0, "", ha="center", color=COLORS["point_d"], fontsize=9, zorder=7),
-        "status": info.text(0.0, 0.72, "", color=COLORS["accent"], fontsize=12, fontweight="bold", va="top"),
-        "detail": info.text(0.0, 0.08, "", color=COLORS["text"], fontsize=10, va="bottom", family="monospace"),
+        "status": info.text(
+            0.0, 0.72, "", color=COLORS["accent"], fontsize=12, fontweight="bold", va="top"
+        ),
+        "detail": info.text(
+            0.0,
+            0.08,
+            "",
+            color=COLORS["text"],
+            fontsize=10,
+            va="bottom",
+            family="monospace",
+        ),
     }
 
     ax.add_patch(artists["interval"])
     ax.add_patch(artists["discarded"])
 
     def update(i: int) -> list:
-        draw_frame(ax, info, frames[i], artists)
+        draw_frame(ax, frames[i], artists, problem)
         return list(artists.values())
 
     anim = animation.FuncAnimation(
@@ -228,22 +250,54 @@ def create_animation(save_path: Path | None = None) -> animation.FuncAnimation:
 
     if save_path is not None:
         suffix = save_path.suffix.lower()
-        if suffix == ".gif":
-            writer = animation.PillowWriter(fps=12)
-        else:
-            writer = animation.FFMpegWriter(fps=12, bitrate=2400)
+        writer = (
+            animation.PillowWriter(fps=12)
+            if suffix == ".gif"
+            else animation.FFMpegWriter(fps=12, bitrate=2400)
+        )
         anim.save(save_path, writer=writer, dpi=120)
-        print(f"Saved animation to {save_path}")
+        print(f"Saved {problem.id} → {save_path}")
 
     return anim
+
+
+def run_problem(problem: Problem, save_path: Path | None, show: bool) -> None:
+    lo, hi = problem.interval
+    estimate = gss(problem.f, lo, hi, tolerance=TOLERANCE)
+    n_steps = sum(1 for s in gss_iterate(problem.f, lo, hi, tolerance=TOLERANCE) if s.c is not None)
+    print(
+        f"[{problem.id}] x* ≈ {estimate:.4f}  "
+        f"(true {problem.true_minimum})  —  {n_steps} search steps, tolerance {TOLERANCE}"
+    )
+    anim = create_animation(problem, save_path=save_path)
+    if show and save_path is None:
+        plt.show()
+    else:
+        plt.close(anim._fig)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Animate Golden Section Search")
     parser.add_argument(
+        "--problem",
+        choices=list(PROBLEMS),
+        default="quadratic",
+        help="Which function to visualize (default: quadratic)",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Render every built-in problem",
+    )
+    parser.add_argument(
         "--save",
         type=Path,
         help="Save animation to file (.gif or .mp4)",
+    )
+    parser.add_argument(
+        "--save-dir",
+        type=Path,
+        help="With --all, write one GIF per problem into this directory",
     )
     parser.add_argument(
         "--no-show",
@@ -252,14 +306,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    minimum = gss(objective, *INTERVAL, tolerance=TOLERANCE)
-    print(f"Golden section estimate: x* ≈ {minimum:.8f}")
+    show = not args.no_show
 
-    anim = create_animation(save_path=args.save)
-    if not args.no_show and args.save is None:
-        plt.show()
-    elif args.save is not None and args.no_show:
-        plt.close(anim._fig)
+    if args.all:
+        out_dir = args.save_dir or Path(".")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for problem in PROBLEMS.values():
+            path = out_dir / f"golden_section_{problem.id}.gif"
+            run_problem(problem, save_path=path, show=False)
+        return
+
+    problem = get_problem(args.problem)
+    save_path = args.save
+    if save_path is None and args.no_show:
+        save_path = Path(f"golden_section_{problem.id}.gif")
+
+    run_problem(problem, save_path=save_path, show=show and save_path is None)
 
 
 if __name__ == "__main__":
